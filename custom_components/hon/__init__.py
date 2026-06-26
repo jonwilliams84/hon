@@ -11,6 +11,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from pyhon import Hon
 
 from .const import DOMAIN, PLATFORMS, MOBILE_ID, CONF_REFRESH_TOKEN
+from ._pyhon_patch import apply_pyhon_patches
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -28,6 +29,9 @@ CONFIG_SCHEMA = vol.Schema(
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    # Fix pyhon-revived discarding a successful retry after token re-auth
+    # (first command/poll failing on token expiry). See _pyhon_patch.
+    apply_pyhon_patches()
     session = aiohttp_client.async_get_clientsession(hass)
     if (config_dir := hass.config.config_dir) is None:
         raise ValueError("Missing Config Dir")
