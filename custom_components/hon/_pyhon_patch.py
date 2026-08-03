@@ -51,14 +51,16 @@ def _patch_awscrt_metrics() -> None:
     ``tls_ctx._certificate_source`` which doesn't exist on
     ``ClientTlsContext``. Metrics are AWS telemetry (feature reporting),
     not functional — safe to skip entirely.
+
+    Returns ``None`` instead of an ``AWSIoTMetrics`` object because the
+    C extension (``_awscrt.mqtt5_client_new``) passes ``self._metrics``
+    to the native layer which expects bytes or None, not a Python object.
     """
     import awscrt.aws_iot_metrics as metrics_mod
     import awscrt.mqtt5 as mqtt5_mod
 
-    def _safe_create_metrics_mqtt5(client_options: object) -> object:  # noqa: ANN401
-        return metrics_mod._create_metrics(
-            getattr(client_options, "metrics", None), ""
-        )
+    def _safe_create_metrics_mqtt5(client_options: object) -> None:
+        return None
 
     # Patch both: aws_iot_metrics (source) AND mqtt5 (has its own imported binding)
     metrics_mod._create_metrics_mqtt5 = _safe_create_metrics_mqtt5
