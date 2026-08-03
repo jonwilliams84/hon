@@ -1,19 +1,26 @@
-"""Runtime patch for pyhon-revived's authenticated request handler.
+"""Runtime patches for pyhon-revived and awscrt.
 
-pyhon-revived 0.19.0's ``HonConnectionHandler._intercept`` retries a request up
-to two times on auth failure (loop 0: refresh token, loop 1: full re-login), but
-its final branch (``elif loop >= 2``) raises ``HonAuthenticationError`` *without
-checking the response status*. So when the loop-2 retry actually succeeds
-(HTTP 200, the appliance command/poll is accepted by the server), the successful
-response is discarded and an exception is raised back to Home Assistant.
+Two patches, both applied once from ``async_setup_entry`` via
+``apply_pyhon_patches()``:
 
-The visible effect after a token expires during idle: the first command "fails"
-even though the unit received it, and the poll that triggers the re-auth leaves
-entity states stale until the next cycle.
+1. **awscrt metrics crash** — awscrt 0.35.0's ``_create_metrics_mqtt5`` calls
+   ``_get_encoded_feature_list`` which accesses
+   ``client_options.tls_ctx._certificate_source``. This attribute doesn't exist
+   on ``ClientTlsContext`` in this version, causing ``AttributeError`` on every
+   MQTT5 client creation — i.e. the hon integration can never set up. The patch
+   replaces ``_create_metrics_mqtt5`` with a safe no-op that skips the feature
+   list entirely (metrics are telemetry only, not functional). Remove when
+   awscrt fixes the attribute access in a version pinned by manifest.json.
 
-This module reinstates the success path on the final attempt: it only treats
-``loop >= 2`` as a failure when the response is *still* a 401/403. Applied once
-from ``async_setup_entry``; removable when fixed upstream.
+2. **pyhon-revived auth retry** — pyhon-revived 0.19.0's
+   ``HonConnectionHandler._intercept`` retries a request up to two times on auth
+   failure (loop 0: refresh token, loop 1: full re-login), but its final branch
+   (``elif loop >= 2``) raises ``HonAuthenticationError`` *without checking the
+   response status*. So when the loop-2 retry actually succeeds (HTTP 200, the
+   appliance command/poll is accepted by the server), the successful response is
+   discarded and an exception is raised back to Home Assistant. The patch
+   reinstates the success path: it only treats ``loop >= 2`` as a failure when
+   the response is *still* a 401/403.
 """
 
 from __future__ import annotations
@@ -34,6 +41,29 @@ from pyhon.typedefs import Callback
 _LOGGER = logging.getLogger(__name__)
 
 _PATCHED = False
+
+
+def _patch_awscrt_metrics() -> None:
+    """Disable awscrt's broken MQTT5 metrics telemetry.
+
+    awscrt 0.35.0 crashes in ``_create_metrics_mqtt5`` →
+    ``_get_encoded_feature_list`` because it accesses
+    ``tls_ctx._certificate_source`` which doesn't exist on
+    ``ClientTlsContext``. Metrics are AWS telemetry (feature reporting),
+    not functional — safe to skip entirely.
+    """
+    import awscrt.aws_iot_metrics as metrics_mod
+    import awscrt.mqtt5 as mqtt5_mod
+
+    def _safe_create_metrics_mqtt5(client_options: object) -> object:  # noqa: ANN401
+        return metrics_mod._create_metrics(
+            getattr(client_options, "metrics", None), ""
+        )
+
+    # Patch both: aws_iot_metrics (source) AND mqtt5 (has its own imported binding)
+    metrics_mod._create_metrics_mqtt5 = _safe_create_metrics_mqtt5
+    mqtt5_mod._create_metrics_mqtt5 = _safe_create_metrics_mqtt5
+    _LOGGER.debug("Patched awscrt _create_metrics_mqtt5 (telemetry disabled)")
 
 
 @asynccontextmanager
@@ -100,13 +130,15 @@ async def _intercept(
 
 
 def apply_pyhon_patches() -> None:
-    """Monkeypatch pyhon-revived. Idempotent; safe to call on every setup."""
+    """Monkeypatch pyhon-revived and awscrt. Idempotent; safe to call on every setup."""
     global _PATCHED
     if _PATCHED:
         return
+    # Patch awscrt FIRST — the MQTT5 client crash happens during Hon().create()
+    _patch_awscrt_metrics()
     HonConnectionHandler._intercept = _intercept  # type: ignore[method-assign]
     _PATCHED = True
     _LOGGER.debug(
-        "Applied pyhon-revived _intercept patch "
-        "(successful retry on loop>=2 no longer discarded)"
+        "Applied runtime patches: awscrt metrics disabled, "
+        "pyhon-revived _intercept fixed (successful retry on loop>=2 no longer discarded)"
     )
